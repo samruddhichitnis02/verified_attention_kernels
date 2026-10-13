@@ -1,94 +1,155 @@
 # Verified Attention Kernels
 
-**A correctness-first pipeline for generating, validating, tuning, and analyzing GPU attention kernels.**
+**A correctness-first GPU kernel pipeline for attention workloads.**
 
-This project is being developed for deep learning systems and GPU kernel engineering. It focuses on a small but important problem:
+Verified Attention Kernels focuses on one practical problem in deep learning systems:
 
-> How can we create a faster attention kernel without accepting a kernel that produces the wrong answer?
+> How do we make attention faster without accepting a kernel that produces an incorrect answer?
 
-The project takes a structured attention description, creates a trusted PyTorch reference, runs a Triton or CUDA implementation, validates numerical correctness, searches for faster GPU configurations, and compares equivalent workloads against established implementations.
+The project takes a structured attention description, matches it with a trusted PyTorch reference, runs a Triton or CUDA implementation, validates the numerical output, searches for efficient GPU launch parameters, and compares equivalent workloads with established implementations.
 
-The project is intentionally scoped. It does not claim to generate every possible GPU kernel. It focuses on a constrained family of attention workloads so that correctness, performance, and the reason for every optimization can be explained clearly.
+The project is intentionally focused on a small family of attention workloads. The goal is not to claim that one program generates every possible GPU kernel. The goal is to build a clear, testable, and explainable path from an attention description to a GPU implementation.
 
-> **Correctness comes first. Performance is measured only after correctness passes.**
-
----
-
-## Project status
-
-This repository documents the complete design and staged implementation plan.
-
-The project is being built in the following order:
-
-1. Attention specification
-2. Trusted PyTorch reference
-3. Restricted causal Triton kernel
-4. Correctness and edge case tests
-5. CUDA event benchmark harness
-6. Autotuning
-7. Sliding window attention
-8. GQA decode attention
-9. CUDA C++ implementation
-10. Nsight profiling and performance analysis
-11. Fair comparisons with PyTorch and FlashInfer
-12. Optional AI assisted optimization
-
-Benchmark numbers, speedups, and profiling claims will be added only after they are measured reproducibly on the documented hardware and software environment.
+> **Correctness comes first. Performance is considered only after correctness passes.**
 
 ---
 
-## Why this problem matters
+## Why attention matters
 
-Modern language models spend a large amount of time in repeated tensor operations. Attention is one of the most important of these operations.
+Attention is a central operation in modern language models.
 
-Suppose a chatbot receives:
+Imagine a chatbot receives:
 
 > “The capital of France is ___”
 
-Before predicting the next word, the model examines the words in the prompt and decides which ones are relevant. The word “France” is more important for this prediction than unrelated words elsewhere in the prompt.
+Before predicting the next word, the model looks at the words in the prompt and decides which ones are relevant. The word “France” matters more for this prediction than unrelated words.
 
 This process is called **attention**.
 
-For a short prompt, attention is manageable. For a long prompt, the model may need to compare many tokens with many other tokens. That creates substantial:
+For a short prompt, attention is manageable. For a long prompt, the model compares many tokens with one another. This creates a large amount of:
 
-- matrix multiplication work;
-- memory traffic;
-- softmax work;
+- matrix multiplication;
+- memory movement;
+- softmax computation;
+- intermediate data;
 - GPU synchronization;
-- intermediate storage;
 - kernel launch overhead.
 
-A GPU can perform this work efficiently, but the implementation must be designed around the GPU's memory hierarchy and execution model.
+A GPU can execute this work quickly, but only when the computation is organized carefully around the GPU hardware.
 
-That specialized GPU program is called a **kernel**.
+A specialized GPU function for one operation is called a **kernel**.
 
-The challenge is that attention is not one fixed operation. Its behavior changes depending on:
+Different attention workloads need different kernels because their computation and memory access patterns are different. A kernel that is fast for one shape may be slow for another. A kernel that is fast but numerically wrong is unusable.
 
-- whether the model is processing a complete prompt or generating one token;
-- whether attention is causal or local;
-- sequence length;
-- head dimension;
-- data type;
-- grouped query attention;
-- key value cache layout;
-- batch size;
-- GPU architecture.
-
-A kernel that is fast for one shape may be slow for another shape. A kernel that is fast may also be numerically wrong. This project treats both problems as first class engineering requirements.
+This project treats correctness and performance as equally important.
 
 ---
 
-## The project in one sentence
+## Attention in simple terms
 
-> A small compiler-like pipeline converts an attention specification into a GPU kernel, validates it against a trusted PyTorch reference, autotunes its launch configuration, and explains its performance using reproducible benchmarks and NVIDIA profiling tools.
+Attention uses three tensors:
+
+- **Query:** what the current token is looking for;
+- **Key:** the information associated with every token;
+- **Value:** the content returned when a key is considered relevant.
+
+A simplified version of attention is:
+
+```text
+scores = Query × Key^T
+weights = softmax(scores)
+output = weights × Value
+```
+
+The score measures how relevant each key is to a query. Softmax converts the scores into weights. The weighted values form the output passed to the next layer.
+
+The mathematical expression is short, but an efficient GPU implementation must also handle:
+
+- global memory loads and stores;
+- tile reuse;
+- stable softmax;
+- masking;
+- thread and warp organization;
+- register usage;
+- shared memory;
+- tensor shapes that do not divide evenly;
+- reduced precision such as FP16 and BF16.
+
+That gap between a simple mathematical operation and an efficient hardware implementation is the main focus of this project.
 
 ---
 
-## What the system takes in and produces
+## What is a GPU kernel?
 
-### Input
+A kernel is a function executed by many GPU threads in parallel.
 
-A small attention specification:
+A high-level PyTorch operation may look like this:
+
+```python
+output = torch.matmul(query, key.transpose(-2, -1))
+```
+
+PyTorch selects and launches lower-level GPU kernels to perform the operation.
+
+This project studies the kernel level. It controls decisions such as:
+
+- how queries and keys are divided into tiles;
+- which threads load each part of the tensors;
+- how data is reused;
+- how softmax is computed;
+- how many warps participate;
+- how much shared memory and register space is used;
+- whether large intermediate tensors are written to global memory.
+
+A kernel is not considered successful merely because it compiles. It must match the trusted reference within defined numerical tolerances and must be measured under a reproducible benchmark setup.
+
+---
+
+## Project objective
+
+The objective is to build a small compiler-like and autotuning pipeline:
+
+```text
+attention description
+        |
+        v
+trusted PyTorch reference
+        |
+        v
+Triton or CUDA kernel
+        |
+        v
+correctness validation
+        |
+        v
+autotuning
+        |
+        v
+fair benchmark
+        |
+        v
+Nsight performance analysis
+```
+
+The pipeline connects:
+
+- a structured workload description;
+- a deep learning framework;
+- GPU kernel implementations;
+- numerical validation;
+- configuration search;
+- runtime measurement;
+- hardware-level analysis.
+
+This makes the project more than an isolated custom kernel. It represents the surrounding library and runtime workflow required to use a kernel reliably.
+
+---
+
+## Attention specification
+
+The workload is described using a small structured specification.
+
+Example:
 
 ```yaml
 operation: causal_prefill
@@ -102,348 +163,209 @@ batch_size: 2
 sequence_length: 2048
 ```
 
-### Processing
+The fields describe:
 
-The system:
+| Field | Meaning |
+|---|---|
+| operation | The attention workload, such as prefill or decode |
+| mask | Which query-key pairs are allowed |
+| window_size | The local attention range when windowed attention is used |
+| dtype | FP16, BF16, or FP32 |
+| head_dim | The size of each attention head |
+| num_query_heads | Number of query heads |
+| num_kv_heads | Number of key-value heads |
+| batch_size | Number of examples processed together |
+| sequence_length | Number of tokens in the sequence |
 
-1. Parses the specification.
-2. Selects the matching reference implementation.
-3. Selects or generates the matching GPU kernel.
-4. Runs numerical correctness tests.
-5. Searches valid kernel configurations.
-6. Measures the fastest correct configuration.
-7. Compares it with equivalent PyTorch and FlashInfer implementations.
-8. Stores the configuration, environment, correctness results, timing results, and profiling notes.
-
-### Output
-
-For every tested workload, the project should produce:
-
-- the attention specification;
-- the selected kernel implementation;
-- the selected tuning configuration;
-- maximum absolute error;
-- relative error;
-- latency statistics;
-- memory measurements where available;
-- GPU and software environment metadata;
-- profiling notes explaining the bottleneck;
-- a reproducible command for rerunning the experiment.
+The specification gives the system explicit information instead of asking the kernel generator to infer every detail from free-form text.
 
 ---
 
-## How attention works in simple terms
+## Supported workload families
 
-Attention uses three representations:
+The project focuses on three workload families.
 
-- **Query:** what the current token is looking for;
-- **Key:** what information each previous token contains;
-- **Value:** the information that is returned when a key is considered relevant.
+| Workload | Simple meaning | Main systems challenge |
+|---|---|---|
+| Causal prefill attention | Process a complete prompt while each token sees only allowed earlier tokens | Tiling, masking, online softmax, and memory reuse |
+| Sliding-window causal attention | Each token sees only a fixed number of recent tokens | Efficient local masking and avoiding unnecessary work |
+| GQA decode attention | Generate one token at a time while reading a saved key-value cache | Cache access, head mapping, and decode-time memory behavior |
 
-A simplified attention operation is:
+### Causal prefill attention
+
+During prefill, the model processes many prompt tokens at once.
+
+With causal attention, a token cannot use information from the future. Token 5 can use tokens 1 through 5, but it cannot use token 6.
+
+The kernel handles:
+
+- the causal mask;
+- tiled query and key blocks;
+- stable softmax;
+- efficient data reuse;
+- sequence lengths that do not align with tile sizes.
+
+Prefill is the first workload because it provides a clear starting point for understanding attention tiling and correctness.
+
+### Sliding-window causal attention
+
+In sliding-window attention, each token attends only to a local range.
+
+For a window size of 256, a token attends to at most the most recent 256 permitted tokens.
+
+This reduces unnecessary work for long contexts, but it creates additional boundary cases:
+
+- the valid key range changes for each query row;
+- some blocks are completely outside the window;
+- some blocks are only partially valid;
+- masked values must not affect softmax;
+- unnecessary memory loads reduce the value of the local window.
+
+### GQA decode attention
+
+During autoregressive generation, the model generates one token at a time.
+
+The keys and values from previous tokens are kept in a **key-value cache**. The model reads this cache instead of recomputing the entire previous sequence at every decoding step.
+
+Grouped Query Attention reduces the number of key-value heads. Several query heads share one key-value head.
+
+Example:
 
 ```text
-scores = Query × Key^T
-weights = softmax(scores)
-output = weights × Value
+32 query heads
+8 key-value heads
+4 query heads share each key-value head
 ```
 
-The score tells the model how relevant each token is. Softmax converts the scores into weights. The weighted values create the output used by the next layer.
+GQA decode is a separate kernel family because it introduces:
 
-The formula is simple to write, but the efficient GPU implementation is difficult because it must:
-
-- load data from global memory efficiently;
-- reuse values instead of loading them repeatedly;
-- avoid storing unnecessarily large intermediate matrices;
-- perform softmax stably;
-- handle masks correctly;
-- use threads and warps efficiently;
-- work for different tensor shapes.
-
-This is why attention kernels are a useful case study for GPU systems engineering.
+- key-value cache reads;
+- query-to-key-value head mapping;
+- decode-specific memory access;
+- different batch and sequence behavior;
+- different bottlenecks from prefill attention.
 
 ---
 
-## What is a kernel?
+## System components
 
-A kernel is a function executed by many GPU threads.
+### 1. Reference implementation
 
-A simple PyTorch operation may be expressed as:
+The PyTorch reference is clear and simple rather than highly optimized.
 
-```python
-output = torch.matmul(query, key.transpose(-2, -1))
-```
+It provides the expected numerical result for the same input used by the candidate kernel.
 
-PyTorch then selects and launches one or more lower level GPU kernels.
+The reference is used for:
 
-In this project, the goal is to study what happens underneath that high level operation. We write or generate a specialized kernel that controls important implementation choices such as:
+- output comparison;
+- randomized tests;
+- edge-case tests;
+- numerical tolerance checks;
+- regression checks after kernel changes.
 
-- how queries and keys are divided into tiles;
-- which threads load which values;
-- how data is reused;
-- how softmax is computed;
-- how many warps execute the work;
-- how much shared memory and register space is used;
-- whether intermediate results are written to global memory.
+The reference is the correctness oracle, not the performance target.
 
-The kernel is not accepted merely because it compiles. It must produce an answer close enough to the trusted reference and must be measured on the target workload.
+### 2. Kernel implementation
 
----
+The candidate kernel is written in Triton or CUDA C++.
 
-## The complete pipeline
+The first kernel uses a restricted workload so the implementation is easier to inspect and debug. The scope includes clearly defined:
 
-```text
-1. Attention specification
-          |
-          v
-2. Trusted PyTorch reference
-          |
-          v
-3. Triton or CUDA kernel
-          |
-          v
-4. Correctness validation
-          |
-          v
-5. CUDA event benchmark
-          |
-          v
-6. Autotuning search
-          |
-          v
-7. Fair comparison
-          |
-          v
-8. Nsight profiling
-          |
-          v
-9. Reproducible report
-```
+- tensor layouts;
+- supported data types;
+- head dimensions;
+- masks;
+- sequence lengths;
+- batch behavior.
 
-### Step 1: Attention specification
+The kernel interface follows the same input and output definition as the reference implementation.
 
-The specification is a small structured description of the workload.
+### 3. Correctness gate
 
-It defines:
+Every candidate passes through a correctness gate before performance selection.
 
-- operation type;
-- mask type;
-- local window size;
-- data type;
-- head dimension;
-- number of query heads;
-- number of key value heads;
-- batch size;
-- sequence length;
-- key value cache layout for decode workloads.
-
-The specification prevents the system from relying on vague natural language alone. It gives the compiler-like pipeline explicit information to use.
-
-### Step 2: Trusted PyTorch reference
-
-The project first implements a clear PyTorch version of the same operation.
-
-This implementation is not intended to be the fastest. Its purpose is to provide a readable and trusted answer for a given input.
-
-The reference is used as the numerical oracle for:
-
-- kernel correctness;
-- randomized testing;
-- edge case testing;
-- regression testing;
-- tolerance checks after tuning.
-
-The project uses the phrase **trusted reference**, not “mathematical proof.” Passing the reference tests demonstrates empirical correctness for the tested inputs and tolerances.
-
-### Step 3: Triton or CUDA kernel
-
-The candidate implementation performs the same mathematical operation using GPU-specific code.
-
-The first candidate is intentionally restricted:
-
-- one operation;
-- one supported data type;
-- fixed or limited head dimensions;
-- clearly defined tensor layouts;
-- limited mask behavior.
-
-The scope expands only after the smaller kernel is correct and benchmarkable.
-
-### Step 4: Correctness validation
-
-The candidate kernel is compared with the PyTorch reference.
-
-The comparison uses:
+The gate compares the candidate output with the reference output using:
 
 - maximum absolute error;
 - maximum relative error;
-- dtype-specific tolerances;
+- data-type-specific tolerances;
 - randomized inputs;
-- edge case inputs.
+- boundary and edge-case inputs.
 
-A failed candidate does not proceed to performance tuning.
+A candidate that fails the gate is rejected from the tuning and benchmark results.
 
-### Step 5: CUDA event benchmark
+### 4. CUDA event benchmark
 
-GPU operations are asynchronous. Measuring them with ordinary Python wall clock timing can include unrelated CPU behavior or can finish before the GPU has completed its work.
+GPU operations execute asynchronously. Ordinary Python timing can include CPU overhead or measure the wrong interval.
 
-The benchmark harness therefore uses:
+The benchmark uses:
 
-- warm up executions;
+- warm-up executions;
 - CUDA events;
 - explicit synchronization;
 - repeated trials;
 - median latency;
-- measurement spread;
-- separate compilation and steady state timing where relevant.
+- timing variation;
+- separate compilation and steady-state measurements.
 
-The benchmark also records the exact workload and environment.
+The timing harness measures the kernel execution that matters for the workload instead of mixing compilation time with steady-state latency.
 
-### Step 6: Autotuning
+### 5. Autotuner
 
-The same kernel can run at different speeds depending on its configuration.
+A GPU kernel can run at different speeds with different launch configurations.
 
-The autotuner searches combinations such as:
+The autotuner searches parameters such as:
 
 - query tile size;
 - key tile size;
 - number of warps;
 - pipeline stages;
 - block layout;
-- split K strategy where applicable;
-- launch parameters allowed by the target GPU.
+- split-K strategy where applicable;
+- legal launch parameters for the target GPU.
 
-Every configuration must pass correctness before it can become the selected configuration.
+Each configuration passes correctness before timing. The selected configuration is the fastest configuration that satisfies the numerical checks for the specified workload.
 
-### Step 7: Fair comparison
+### 6. Benchmark comparison
 
-The selected kernel is compared against existing implementations only for equivalent operations.
+The selected kernel is compared against equivalent PyTorch and FlashInfer operations.
 
-The comparison records:
+The comparison includes:
 
 - latency;
-- maximum absolute error;
-- relative error;
-- memory use where measurable;
-- hardware and software versions;
-- operation type;
+- numerical error;
+- data type;
 - tensor shapes;
-- mask;
-- data type.
+- masks;
+- operation type;
+- memory use where measurable;
+- GPU and software environment.
 
-The project does not present an unfair comparison as a performance win.
+The comparison does not mix prefill with decode or compare different masks as if they were the same workload.
 
-### Step 8: Nsight profiling
+### 7. Nsight analysis
 
 Benchmark timing answers:
 
-> How fast was it?
+> How fast is the implementation?
 
-Nsight profiling helps answer:
+Nsight Systems and Nsight Compute help answer:
 
-> Why was it that fast or slow?
+> Why does the implementation perform that way?
 
-The analysis examines:
+The analysis covers:
 
-- global memory loads and stores;
+- global memory traffic;
 - memory coalescing;
 - shared memory;
-- registers;
+- register usage;
 - occupancy;
 - arithmetic intensity;
-- tensor core or floating point utilization;
+- floating point and tensor core utilization;
+- warp stalls;
 - synchronization;
 - kernel launch overhead;
-- pipeline behavior;
-- compute bound versus memory bound behavior.
-
-### Step 9: Reproducible report
-
-Every reported result includes enough information for another person to understand and rerun the experiment.
-
-The report records:
-
-- the specification;
-- the input shapes;
-- the data type;
-- the selected configuration;
-- correctness tolerances;
-- timing method;
-- latency statistics;
-- memory measurements;
-- GPU model;
-- driver version;
-- CUDA version;
-- PyTorch version;
-- Triton version;
-- FlashInfer version;
-- profiling observations.
-
----
-
-## Supported workload families
-
-The first version focuses on three attention workloads. These workloads cover different inference behaviors and expose different kernel challenges.
-
-| Workload | Plain language meaning | Why it matters |
-|---|---|---|
-| Causal prefill attention | Process a complete prompt while each token sees only allowed earlier tokens | Represents the prompt processing phase |
-| Sliding window causal attention | Each token looks only at the most recent fixed number of tokens | Reduces unnecessary attention work for long contexts |
-| GQA decode attention | Generate one token at a time while reading a saved key value cache | Represents autoregressive generation and memory sensitive decode |
-
-### 1. Causal prefill attention
-
-During prefill, the model processes many prompt tokens at once.
-
-With causal attention, a token cannot look at future tokens. For example, token 5 can use tokens 1 through 5, but it cannot use token 6.
-
-The kernel must:
-
-- apply the causal mask;
-- compute attention for a complete sequence;
-- avoid unnecessary intermediate storage;
-- handle tiled query and key blocks;
-- maintain numerically stable softmax values.
-
-This is the first kernel family because it provides a clear starting point for correctness and tiling.
-
-### 2. Sliding window causal attention
-
-In sliding window attention, each token looks only at a local region.
-
-For a window size of 256, a token attends to at most the most recent 256 permitted tokens.
-
-This can reduce work for long sequences, but it creates additional implementation issues:
-
-- the valid key range changes by query position;
-- some blocks are fully outside the window;
-- boundary blocks may be partially valid;
-- the kernel must avoid reading or computing unnecessary values;
-- irregular masking can reduce efficiency if handled poorly.
-
-### 3. GQA decode attention
-
-During autoregressive generation, the model usually generates one new token at a time.
-
-The keys and values from previous tokens are stored in a **key value cache**, so the model does not recompute the entire sequence for every new token.
-
-Grouped Query Attention reduces the number of key value heads. Multiple query heads share one key value head.
-
-For example:
-
-```text
-32 query heads
-8 key value heads
-4 query heads share each key value head
-```
-
-GQA decode is treated as a separate kernel family because it introduces:
-
-- key value cache reads;
-- query to key value head mapping;
-- decode specific memory access;
-- different batch and sequence behavior;
-- different performance bottlenecks from prefill.
+- compute-bound versus memory-bound behavior.
 
 ---
 
@@ -451,177 +373,201 @@ GQA decode is treated as a separate kernel family because it introduces:
 
 ### Tiling
 
-Instead of processing the full attention matrix at once, the kernel processes smaller blocks called tiles.
+The full attention matrix is not processed as one enormous object. The kernel processes smaller blocks called tiles.
 
-A tile may contain:
+A tile contains a block of query rows and a block of key columns. Processing tiles allows the kernel to reuse data and avoid materializing the entire attention matrix.
 
-- a block of query rows;
-- a block of key columns;
-- the corresponding values.
+Tile size affects:
 
-Tiling helps the GPU reuse data and avoid storing the entire attention matrix.
-
-The tile sizes affect:
-
-- memory reuse;
-- register use;
-- shared memory;
+- data reuse;
+- register pressure;
+- shared-memory usage;
 - occupancy;
-- the number of instructions;
-- boundary handling.
+- boundary handling;
+- instruction count.
 
 ### Online softmax
 
-A naive attention implementation may create a large score matrix and then apply softmax to it.
+A simple implementation may create a large score matrix and apply softmax afterward.
 
-A memory efficient kernel can update the softmax statistics while processing blocks. This avoids writing the complete score matrix to global memory.
+A memory-efficient attention kernel updates the softmax statistics while processing tiles. This reduces intermediate global-memory traffic.
 
-The implementation must maintain the running maximum and normalization values carefully so that the result remains numerically stable.
+The kernel maintains running softmax values carefully so that the result remains numerically stable.
 
 ### Masking
 
-The kernel must prevent invalid query key pairs from contributing to the output.
+The kernel must prevent invalid query-key pairs from affecting the result.
 
 For causal attention, future tokens are masked.
 
-For sliding window attention, tokens outside the local range are masked.
+For sliding-window attention, tokens outside the local window are masked.
 
-Masking is a correctness issue and a performance issue. A correct implementation must produce the same result as the reference. An efficient implementation should avoid doing unnecessary work for fully invalid regions when possible.
+Masking affects both correctness and performance. Incorrect masking changes the model output. Poor masking can make the kernel perform work on values that do not contribute to the result.
 
 ### Memory movement
 
-Many attention optimizations are really memory movement optimizations.
+Many attention optimizations reduce unnecessary memory movement.
 
-The kernel may improve performance by:
+The implementation may improve data movement by:
 
-- loading data in coalesced patterns;
-- reusing tiles;
-- reducing global memory writes;
-- avoiding materialization of large intermediate tensors;
+- using coalesced loads;
+- reusing query, key, and value tiles;
+- reducing global-memory writes;
+- avoiding large intermediate tensors;
 - using shared memory carefully;
 - keeping frequently reused values in registers when practical.
+
+A custom kernel is not automatically faster. The benchmark and profiler provide the evidence.
+
 ---
 
 ## Correctness methodology
 
-The project uses a correctness gate before performance selection.
-
 ### Numerical comparison
 
-For each candidate output, the test harness computes:
+The test harness compares the candidate output with the reference output.
+
+The main measurements are:
 
 - maximum absolute error;
 - maximum relative error;
-- optionally mean absolute error for additional diagnostics.
+- mean absolute error as an additional diagnostic.
 
-The tolerances are documented per data type and operation. FP16 and BF16 computations may have larger expected numerical differences than FP32 computations.
+Tolerances depend on the operation and data type. FP16 and BF16 can show larger numerical differences than FP32 because the computations use lower precision.
 
-A candidate is accepted only when it satisfies the stated tolerance policy.
+A candidate passes only when it satisfies the defined tolerance policy.
 
-### Randomized tests
+### Randomized testing
 
-Random tests vary the supported workload dimensions, including:
+The tests vary:
 
 - batch size;
 - sequence length;
 - number of query heads;
-- number of key value heads;
+- number of key-value heads;
 - head dimension;
-- causal versus local masking;
+- mask type;
 - input magnitude;
 - data type;
 - dimensions that do not align with tile sizes.
 
-Randomized tests are important because a kernel may work for one convenient shape and fail for another.
+A kernel that succeeds for one convenient shape is not enough. Randomized tests help expose incorrect indexing, masking, boundary handling, and numerical behavior.
 
-### Edge cases
+### Edge-case testing
 
-The test suite includes cases such as:
+The test suite includes:
 
-- sequence length smaller than the tile size;
-- sequence length not divisible by the tile size;
-- head dimension not divisible by the normal tile width;
+- sequence lengths smaller than the tile size;
+- sequence lengths that do not divide evenly into tiles;
+- head dimensions that do not match the normal tile width;
 - very short sequences;
 - longer sequences;
-- single batch;
-- multiple batches;
+- single and multiple batches;
 - small and large input values;
 - causal boundary rows;
-- sliding window boundary rows;
+- sliding-window boundary rows;
 - GQA head mappings;
-- empty or tiny valid windows where the operation permits them.
+- tiny valid windows where the workload permits them.
+
+### Meaning of verified
+
+“Verified” means that a candidate passes the defined numerical validation suite.
+
+It does not mean that a formal mathematical proof covers every possible input.
+
+The validation claim is tied to:
+
+- tested shapes;
+- tested data types;
+- tested masks;
+- stated tolerances;
+- tested edge cases.
 
 ---
 
 ## Autotuning methodology
 
-Autotuning is the process of measuring multiple legal kernel configurations and choosing the fastest configuration for a specific workload.
+Autotuning measures multiple legal kernel configurations and chooses the fastest correct configuration for a specific workload.
 
-The autotuner does not assume that one configuration is best for every input.
+For each attention specification, the tuner:
 
-For each attention specification, it:
-
-1. Generates the legal configuration space.
+1. Creates the legal configuration space.
 2. Compiles or launches each candidate.
-3. Runs correctness tests.
-4. Discards incorrect candidates.
-5. Warms up the accepted candidates.
-6. Measures repeated execution time with CUDA events.
-7. Records median latency and variation.
+3. Runs the correctness gate.
+4. Removes configurations that fail.
+5. Warms up the remaining candidates.
+6. Measures repeated execution with CUDA events.
+7. Calculates median latency and timing variation.
 8. Selects the fastest correct configuration.
-9. Saves the selected configuration with the benchmark result.
 
-The selected configuration is associated with the workload specification. A configuration tuned for a 2048 token sequence may not be best for a 16,384 token sequence.
+A configuration tuned for a 2,048-token sequence is not automatically optimal for a 16,384-token sequence. Kernel performance depends on the workload shape and the target GPU.
 
 ---
 
 ## Benchmarking methodology
 
+### Identical workload requirements
+
+The custom kernel and comparison implementation use the same:
+
+- operation;
+- batch size;
+- sequence length;
+- number of query heads;
+- number of key-value heads;
+- head dimension;
+- mask;
+- data type;
+- scaling rule;
+- output definition;
+- device.
+
 ### Timing procedure
 
-The benchmark uses:
+The benchmark follows this process:
 
-1. Kernel compilation or warm up before measurement.
-2. Several warm up executions.
-3. CUDA event timing.
-4. GPU synchronization at measurement boundaries.
-5. Multiple repeated trials.
-6. Median latency and measurement spread.
-7. Separate reporting of compilation time when applicable.
+1. Compile or warm up the implementation.
+2. Run several warm-up executions.
+3. Start CUDA event timing.
+4. Execute the same operation repeatedly.
+5. Synchronize at the measurement boundaries.
+6. Calculate median latency and timing variation.
+7. Report compilation time separately from steady-state execution.
 
-Compilation time is not mixed with steady state kernel latency.
+### PyTorch comparisons
 
-### Comparing PyTorch
+PyTorch provides both a familiar framework implementation and the numerical reference.
 
-PyTorch is a useful reference because it represents a normal framework implementation and provides the trusted numerical result.
+The comparison can include:
 
-The project may compare against:
-
-- a clear PyTorch reference implementation;
+- the clear PyTorch reference;
 - PyTorch scaled dot product attention;
-- PyTorch FlexAttention where the workload matches.
+- PyTorch FlexAttention when its behavior matches the workload.
 
-### Comparing FlashInfer
+The exact PyTorch path appears next to each result.
 
-FlashInfer is designed for efficient attention and inference workloads, but not every FlashInfer operation is directly equivalent to every custom kernel in this project.
+### FlashInfer comparisons
 
-The project compares FlashInfer only when:
+FlashInfer targets efficient attention and inference workloads, but not every FlashInfer operation matches every custom kernel.
 
-- the operation matches;
-- the mask matches;
-- the tensor layout matches or is converted fairly;
-- the data type matches;
-- the output definition matches;
-- the benchmark includes the same work.
+A FlashInfer comparison is valid only when:
+
+- the operation is the same;
+- the mask is the same;
+- the tensor layout is equivalent;
+- the data type is the same;
+- the output definition is the same;
+- the benchmark includes the same amount of work.
+
+A non-equivalent operation is not presented as a direct performance comparison.
+
 ---
 
 ## Profiling methodology
 
-The project uses two types of Nsight analysis.
-
 ### Nsight Systems
 
-Nsight Systems is used to understand the larger execution timeline:
+Nsight Systems examines the broader execution timeline:
 
 - kernel launch sequence;
 - CPU to GPU interaction;
@@ -632,43 +578,46 @@ Nsight Systems is used to understand the larger execution timeline:
 
 ### Nsight Compute
 
-Nsight Compute is used to inspect individual kernels:
+Nsight Compute examines individual kernels:
 
 - achieved occupancy;
 - memory throughput;
-- global memory efficiency;
-- shared memory behavior;
+- global-memory efficiency;
+- shared-memory behavior;
 - register usage;
 - instruction throughput;
 - warp stalls;
 - arithmetic intensity;
 - compute and memory utilization.
 
-The goal is to connect the profile to a design decision.
+The purpose of profiling is to connect a performance result to a hardware-level explanation.
 
 For example:
 
 ```text
-Observed result:
-The custom kernel reduces latency.
+Measured result:
+The custom kernel has lower latency.
 
-Possible explanation:
-It avoids writing a full attention score matrix to global memory.
+Implementation explanation:
+The kernel avoids writing a complete attention score matrix to global memory.
 
-Evidence needed:
-Lower global memory traffic and a profile showing the changed memory behavior.
+Profiler evidence:
+The profile shows lower global-memory traffic and fewer intermediate writes.
 ```
+
+A custom kernel is not described as optimized merely because it is handwritten. The performance claim depends on timing and profiling evidence.
+
 ---
 
 ## Triton and CUDA C++ roles
 
 ### Triton
 
-Triton is used for rapid kernel development and controlled GPU experimentation.
+Triton provides a productive way to explore GPU kernel designs.
 
-It allows the project to explore:
+It exposes important decisions such as:
 
-- tiled computation;
+- tile shapes;
 - memory layouts;
 - warp count;
 - pipeline stages;
@@ -676,22 +625,23 @@ It allows the project to explore:
 - fused operations;
 - autotuning parameters.
 
-Triton is the first kernel backend because it allows a smaller implementation loop while still exposing important GPU decisions.
+Triton provides a shorter development loop while still requiring GPU-level reasoning.
 
 ### CUDA C++
 
-CUDA C++ is used for a lower level implementation of a simple supported workload.
+CUDA C++ provides a lower-level implementation for a simple supported workload.
 
-The CUDA implementation is exposed to PyTorch through a C++ or CUDA extension. This demonstrates:
+The CUDA kernel integrates with PyTorch through a C++ or CUDA extension. This covers:
 
 - C++ and CUDA integration;
-- explicit thread and block organization;
-- device memory reasoning;
+- thread and block organization;
+- device memory;
 - synchronization;
-- compilation and extension loading;
+- compilation;
 - framework integration.
 
-The project does not assume that CUDA C++ is always faster than Triton. The comparison is measured for a defined workload.
+The project measures Triton and CUDA C++ on the same defined workload rather than assuming one is always faster.
+
 ---
 
 ## Repository structure
@@ -748,10 +698,57 @@ verified_attention_kernels/
 ```
 
 ---
+
+## Technology stack
+
+| Area | Technology |
+|---|---|
+| Language | Python and C/C++ |
+| Deep learning framework | PyTorch |
+| GPU kernel development | Triton and CUDA C++ |
+| Kernel integration | PyTorch C++/CUDA extension |
+| Attention workloads | Causal prefill, sliding-window attention, GQA decode |
+| Comparisons | PyTorch, PyTorch FlexAttention, FlashInfer |
+| Timing | CUDA events and synchronized repeated trials |
+| Profiling | Nsight Systems and Nsight Compute |
+| Hardware focus | NVIDIA CUDA GPUs |
+
+---
+
+## Project summary
+
+Verified Attention Kernels is a correctness-first GPU systems project centered on attention optimization.
+
+It connects:
+
+- PyTorch reference implementations;
+- Triton kernels;
+- CUDA C++ extensions;
+- randomized numerical validation;
+- autotuning;
+- synchronized GPU benchmarking;
+- FlashInfer comparisons;
+- Nsight Systems and Nsight Compute analysis.
+
+The important engineering idea is the order of operations:
+
+1. Define the workload.
+2. Build a trusted reference.
+3. Implement the kernel.
+4. Validate numerical correctness.
+5. Tune legal configurations.
+6. Benchmark equivalent implementations.
+7. Explain the performance using profiling data.
+
+A concise description of the project is:
+
+> I am building a correctness-first autotuning pipeline for attention kernels. A structured workload specification selects a trusted PyTorch reference and a Triton or CUDA implementation. The candidate passes randomized and edge-case numerical tests before it enters the tuning search. The tuner measures tile, warp, and pipeline configurations using synchronized CUDA events and selects the fastest correct configuration for the target workload. The result is compared fairly with PyTorch and FlashInfer, while Nsight explains whether performance is limited by memory movement, computation, occupancy, synchronization, or launch overhead. An optional AI helper proposes changes, but automated correctness and performance checks decide whether they are accepted.
+
+---
+
 ## References
 
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer)
 - [Triton](https://github.com/triton-lang/triton)
 - [FlashAttention](https://github.com/Dao-AILab/flash-attention)
 - [PyTorch FlexAttention](https://pytorch.org/docs/stable/nn.attention.flex_attention.html)
-
